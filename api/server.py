@@ -7,6 +7,8 @@ import json
 import shutil
 import asyncio
 import sys
+import io
+import contextlib
 from dotenv import load_dotenv
 
 # Add the backend directory to Python path to import from your existing code
@@ -123,8 +125,40 @@ async def process_json(job_id: str, input_path: str):
         original_dir = os.getcwd()
         os.chdir(backend_dir)
         
-        # Running your existing workflow
-        result = await run_workflow()
+        # Initialize with first step
+        job_status[job_id].update({
+            "current_step": "data_validation",
+            "step_number": 1,
+            "log_output": []
+        })
+        
+        # Set up log capture
+        class CustomStdout(io.StringIO):
+            def write(self, text):
+                super().write(text)
+                
+                # Update current step based on log output
+                if "Step 1: Running Data Manager Agent" in text:
+                    job_status[job_id].update({"current_step": "data_validation", "step_number": 1})
+                elif "Step 2: Running Budget Agent" in text:
+                    job_status[job_id].update({"current_step": "budget_analysis", "step_number": 2})
+                elif "Step 3: Running Tax Policy Agent" in text:
+                    job_status[job_id].update({"current_step": "tax_policy", "step_number": 3})
+                elif "Step 4: Running Report Agent" in text:
+                    job_status[job_id].update({"current_step": "report_compilation", "step_number": 4})
+                
+                # Add log to output
+                job_status[job_id]["log_output"].append(text)
+                
+                # Keep limited log history (last 50 lines)
+                if len(job_status[job_id]["log_output"]) > 50:
+                    job_status[job_id]["log_output"] = job_status[job_id]["log_output"][-50:]
+        
+        # Capture stdout during workflow execution
+        custom_stdout = CustomStdout()
+        with contextlib.redirect_stdout(custom_stdout):
+            # Running your existing workflow
+            result = await run_workflow()
         
         # Return to original directory
         os.chdir(original_dir)
@@ -150,23 +184,58 @@ async def process_json(job_id: str, input_path: str):
                     report_path = None
             
             if report_path and os.path.exists(report_path):
+                # Keep the current_step and step_number in the completed status
+                current_step = job_status[job_id].get("current_step")
+                step_number = job_status[job_id].get("step_number")
+                log_output = job_status[job_id].get("log_output", [])
+                
                 job_status[job_id] = {
                     "status": "completed", 
                     "report_path": report_path,
-                    "summary": result.get("workflow_summary", {})
+                    "summary": result.get("workflow_summary", {}),
+                    "current_step": current_step,
+                    "step_number": step_number,
+                    "log_output": log_output
                 }
             else:
+                # Keep the current_step and step_number in the failed status
+                current_step = job_status[job_id].get("current_step")
+                step_number = job_status[job_id].get("step_number")
+                log_output = job_status[job_id].get("log_output", [])
+                
                 job_status[job_id] = {
                     "status": "failed", 
-                    "error": "PDF report file not found"
+                    "error": "PDF report file not found",
+                    "current_step": current_step,
+                    "step_number": step_number,
+                    "log_output": log_output
                 }
         else:
+            # Keep the current_step and step_number in the failed status
+            current_step = job_status[job_id].get("current_step")
+            step_number = job_status[job_id].get("step_number")
+            log_output = job_status[job_id].get("log_output", [])
+            
             job_status[job_id] = {
                 "status": "failed", 
-                "error": result.get("reason", "Unknown error")
+                "error": result.get("reason", "Unknown error"),
+                "current_step": current_step,
+                "step_number": step_number,
+                "log_output": log_output
             }
     except Exception as e:
-        job_status[job_id] = {"status": "failed", "error": str(e)}
+        # Keep any step information if available
+        current_step = job_status[job_id].get("current_step", "unknown")
+        step_number = job_status[job_id].get("step_number", 0)
+        log_output = job_status[job_id].get("log_output", [])
+        
+        job_status[job_id] = {
+            "status": "failed", 
+            "error": str(e),
+            "current_step": current_step,
+            "step_number": step_number,
+            "log_output": log_output
+        }
 
 @app.get("/status/{job_id}")
 async def get_job_status(job_id: str):
